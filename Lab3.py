@@ -1,6 +1,5 @@
 import streamlit as st
-from openai import OpenAI
-
+import openai
 def streaming_chatbot():
     st.title("💬 Talk with ChinnuTheAIBot")
     st.write("Chat with the chatbot about your queries!")
@@ -102,7 +101,7 @@ def extract_line_number(question):
 # Function to get a simple answer suitable for a 10-year-old
 def get_simple_answer(question):
     # Use OpenAI to generate a simple answer
-    client = OpenAI(api_key=st.secrets["openai_api_key"])
+    client = openai(api_key=st.secrets["openai_api_key"])
     messages = [
         {"role": "system", "content": "You are a helpful assistant that explains things simply, so a 10-year-old can understand."},
         {"role": "user", "content": question}

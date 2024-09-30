@@ -1,6 +1,5 @@
 import streamlit as st
-from openai import OpenAI
-
+import openai
 
 def ask_question():
     st.title("❓ Ask a Question AnswerMate")
@@ -23,7 +22,7 @@ def ask_question():
 
     if question:
         # Create an OpenAI client
-        client = OpenAI(api_key=openai_api_key)
+        client = openai(api_key=openai_api_key)
         
         # Prepare the messages for the OpenAI API
         messages = [

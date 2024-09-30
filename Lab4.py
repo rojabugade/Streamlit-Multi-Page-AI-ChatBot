@@ -3,6 +3,9 @@ import time
 import PyPDF2
 import streamlit as st
 import openai
+__import__('pysqlite3') 
+import sys 
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
 import chromadb
 from chromadb.utils import embedding_functions
 import tiktoken
@@ -11,7 +14,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 # Initialize OpenAI API key
 openai.api_key = st.secrets["openai_api_key"]
-
 
 # Initialize ChromaDB client with persistent storage
 def initialize_chromadb():
@@ -120,7 +122,7 @@ def generate_response(query):
     if context:
         # Ask GPT to provide an answer using the relevant context from the database
         response = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",  # Use cheaper GPT-3.5-turbo model for generating responses
+            model="gpt-3.5-turbo",  
             messages=[
                 {"role": "system", "content": "You are a helpful assistant."},
                 {"role": "user", "content": f"Context: {context}\n\nQuestion: {query}"},
