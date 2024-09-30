@@ -1,179 +1,197 @@
-import chromadb
-import streamlit as st
-from chromadb import Client
-from chromadb.config import Settings
-import openai
-from PyPDF2 import PdfReader
+import os
 import time
+import PyPDF2
+import streamlit as st
+import openai
+import chromadb
+from chromadb.utils import embedding_functions
+import tiktoken
 import numpy as np
-
-# Check SQLite version compatibility
-import sqlite3
-sqlite_version = sqlite3.sqlite_version
-if sqlite_version < "3.35.0":
-    st.warning(f"Warning: Your SQLite version is {sqlite_version}. Some ChromaDB features may not work.")
-
-print("ChromaDB version:", chromadb.__version__)
-print("NumPy version:", np.__version__)
-print("SQLite version:", sqlite_version)
+from sklearn.metrics.pairwise import cosine_similarity
 
 # Initialize OpenAI API key
 openai.api_key = st.secrets["openai_api_key"]
 
-# Function to extract text from PDF
-def extract_text_from_pdf(pdf_file_path):
-    text = ""
-    with open(pdf_file_path, "rb") as file:
-        pdf = PdfReader(file)
-        for page in pdf.pages:
-            if page.extract_text():
-                text += page.extract_text()
-    return text
 
-# Function to generate embeddings using OpenAI
-def generate_embedding(text):
-    try:
-        response = openai.Embedding.create(
-            model="text-embedding-ada-002",  # Use your preferred OpenAI model
-            input=text
+# Initialize ChromaDB client with persistent storage
+def initialize_chromadb():
+    if "Lab4_vectorDB" not in st.session_state:
+        client = chromadb.PersistentClient(path="./chroma_db")
+        st.session_state.Lab4_vectorDB = client.get_or_create_collection(
+            name="Lab4Collection"
         )
-        import pdb
-        pdb.set_trace()
-        return response['data'][0]['embedding']
-    except Exception as e:
-        st.error(f"Error generating embedding: {e}")
-        return None
+        st.success("ChromaDB collection loaded successfully!")
 
-# Global variable for ChromaDB client
-client = None
+        # Debugging: Print the collection to ensure it's initialized
+        st.write("Loaded collection: ", st.session_state.Lab4_vectorDB)
 
-# Function to initialize the ChromaDB client with new configuration
-def initialize_chroma_client():
-    global client
-    if client is None:
+        # Check if there are any documents stored in the collection
+        num_docs = st.session_state.Lab4_vectorDB.count()
+        st.write(f"Number of documents in the collection: {num_docs}")
+
+
+# Function to count tokens using tiktoken
+def num_tokens_from_string(string: str, encoding_name: str) -> int:
+    encoding = tiktoken.get_encoding(encoding_name)
+    return len(encoding.encode(string))
+
+
+# Function to get embeddings for the query using text-embedding-ada-002
+def get_embedding(text):
+    response = openai.Embedding.create(
+        model="text-embedding-ada-002", input=text  # Using ada for embedding
+    )
+    return np.array(response["data"][0]["embedding"])
+
+
+# Function to extract text from a PDF and split it into chunks using PyPDF2
+def extract_text_chunks_from_pdfs(folder_path, chunk_size=1000):
+    pdf_chunks = {}
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".pdf"):
+            file_path = os.path.join(folder_path, filename)
+            text = ""
+            with open(file_path, "rb") as pdf_file:
+                reader = PyPDF2.PdfReader(pdf_file)
+                # Extract text from all pages in the PDF
+                for page_num in range(len(reader.pages)):
+                    page = reader.pages[page_num]
+                    text += page.extract_text()
+            # Split text into chunks
+            chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+            pdf_chunks[filename] = chunks
+    return pdf_chunks
+
+
+# Function to get embeddings for a list of text chunks with rate limit handling
+def get_embeddings_for_chunks(chunks):
+    embeddings = []
+    for chunk in chunks:
         try:
-            # Simplified configuration without advanced settings
-            client = Client(Settings())
-        except Exception as e:
-            st.error(f"Error: {str(e)}. Please restart the Streamlit session.")
-            return None
-    return client
+            response = openai.Embedding.create(
+                input=chunk, model="text-embedding-ada-002"  # Cheaper embedding model
+            )
+            embeddings.append(response["data"][0]["embedding"])
+            time.sleep(
+                1
+            )  # Add a 1-second delay between each request to avoid rate limiting
+        except openai.error.RateLimitError as e:
+            st.error(
+                f"Rate limit hit: {str(e)}. Waiting for 10 seconds before retrying..."
+            )
+            time.sleep(10)  # If rate limit is hit, wait 10 seconds and retry
+            return get_embeddings_for_chunks(chunks)  # Retry the function
+    return embeddings
 
-# Function to generate embeddings with retry logic
-def generate_embedding_with_retry(text, retries=3, delay=20):
-    for attempt in range(retries):
-        embedding = generate_embedding(text)
-        import pdb
-        pdb.set_trace()
-        if embedding:
-            return embedding
-        if attempt < retries - 1:
-            st.warning(f"Rate limit or error encountered. Retrying in {delay} seconds...")
-            time.sleep(delay)
-    st.error("Exceeded the maximum number of retries. Please try again later.")
-    return None
 
-# Function to create and initialize the ChromaDB collection
-def create_lab4_vector_db():
-    if 'Lab4_vectorDB' not in st.session_state:
-        # Initialize ChromaDB client
-        client = initialize_chroma_client()
-        if client is None:
-            return
+# Function to query the vector database and get relevant context
+def get_relevant_context(query, max_tokens=6000):
+    if "Lab4_vectorDB" in st.session_state:
+        # Generate the embedding for the user's query
+        query_embedding = openai.Embedding.create(
+            input=query, model="text-embedding-ada-002"
+        )["data"][0]["embedding"]
 
-        try:
-            # Check if the collection already exists
-            collection = client.get_collection(name="Lab4Collection")
-            st.info("Using existing collection 'Lab4Collection'.")
-        except Exception:
-            # Create a new collection if it doesn't exist
-            collection = client.create_collection(name="Lab4Collection")
-            st.success("Created new collection 'Lab4Collection'.")
+        # Search the ChromaDB collection for the most relevant documents based on the query embedding
+        results = st.session_state.Lab4_vectorDB.query(
+            query_embeddings=[query_embedding],
+            n_results=5,  # Adjust based on how many results you want
+            include=["documents", "metadatas"],
+        )
 
-        # List of PDF files to add to the collection
-        pdf_files = ["All_pdf_files/IST 644 Syllabus.pdf",
-                     "All_pdf_files/IST 652 Syllabus.pdf",
-                     "All_pdf_files/IST 652 Syllabus.pdf",
-                     "All_pdf_files/IST614 Info tech Mgmt & Policy Syllabus.pdf",
-                     "All_pdf_files/IST688-BuildingHC-AIAppsV2.pdf",
-                     "All_pdf_files/IST688-BuildingHC-AIAppsV2.pdf",
-                     "All_pdf_files/IST736-Text-Mining-Syllabus.pdf"]
-    
+        # Combine results into a readable context
+        context = ""
+        for doc, metadata in zip(results["documents"][0], results["metadatas"][0]):
+            new_context = f"From document '{metadata['filename']}':\n{doc}\n\n"
+            if (
+                num_tokens_from_string(context + new_context, "cl100k_base")
+                <= max_tokens
+            ):
+                context += new_context
+            else:
+                break
+        return context
+    return ""
 
-        embeddings = []
-        documents = []
-        metadatas = []
-        ids = []
 
-        for idx, pdf_file in enumerate(pdf_files):
-            text = extract_text_from_pdf(pdf_file)
-            embedding = generate_embedding_with_retry(text)
-            import pdb
-            pdb.set_trace()
-            if embedding is None:
-                continue  # Skip this file if we couldn't get an embedding
-            embeddings.append(embedding)
-            documents.append(text)
-            metadatas.append({"filename": pdf_file})
-            ids.append(f"doc_{idx}")
+# Function to generate a response based on the user's question
+def generate_response(query):
+    context = get_relevant_context(query)
+    if context:
+        # Ask GPT to provide an answer using the relevant context from the database
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",  # Use cheaper GPT-3.5-turbo model for generating responses
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": f"Context: {context}\n\nQuestion: {query}"},
+            ],
+            max_tokens=300,
+        )
+        return response["choices"][0]["message"]["content"]
+    else:
+        return "I couldn't find relevant information in the documents."
 
-        if len(embeddings) == len(documents) == len(ids):
-            st.info(f"Prepared {len(ids)} embeddings and documents.")
+
+# Add the chatbot UI in your Streamlit app
+def chatbot_page():
+    st.title("Course Information Chatbot")
+
+    # User input to ask questions
+    query = st.text_input("Ask a question about the course:")
+
+    if query and st.button("Submit"):
+        # Generate the response from the chatbot
+        response = generate_response(query)
+
+        # Display the chatbot's response
+        st.write("### ChinnuTheAIBot")
+        st.write(response)
+
+
+# Index PDFs into ChromaDB only if they haven't been indexed yet
+def index_pdfs_in_chromadb():
+    if "Lab4_vectorDB" in st.session_state:
+        # Check if the collection is already populated
+        if (
+            st.session_state.Lab4_vectorDB.count() == 0
+            and "indexed" not in st.session_state
+        ):
+            st.write("No documents found in ChromaDB. Indexing PDFs now...")
+            pdf_chunks = extract_text_chunks_from_pdfs("All_pdf_files")
+
+            # Loop through PDFs and their chunks
+            for filename, chunks in pdf_chunks.items():
+                st.write(f"Indexing {filename}...")
+                embeddings = get_embeddings_for_chunks(chunks)
+                # Add each chunk and its embedding to ChromaDB
+                for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                    chunk_id = (
+                        f"{filename}chunk{idx}"  # Create a unique ID for each chunk
+                    )
+                    st.session_state.Lab4_vectorDB.add(
+                        ids=[chunk_id],  # Unique ID
+                        documents=[chunk],
+                        embeddings=[embedding],
+                        metadatas=[{"filename": filename}],
+                    )
+            st.session_state.indexed = (
+                True  # Set a flag to indicate indexing is complete
+            )
+            st.success("All PDFs indexed successfully!")
         else:
-            st.error("Mismatch between the number of embeddings, documents, and IDs.")
+            st.write("Documents are already indexed, skipping re-indexing.")
 
-        try:
-            # Add all documents, embeddings, metadata, and ids to the collection
-            collection.add(embeddings=embeddings, documents=documents, metadatas=metadatas, ids=ids)
-            st.success("Documents added to the collection successfully.")
-        except Exception as e:
-            st.error(f"Failed to add documents to collection: {e}")
 
-        # Store the collection in session_state
-        st.session_state.Lab4_vectorDB = collection
-        st.success("Vector DB initialized and stored in session state!")
-    else:
-        st.success("Lab4 vector DB already initialized.")
-
-# Function to handle chatbot interaction
-def chatbot_interaction(user_input):
-    if 'Lab4_vectorDB' in st.session_state:
-        collection = st.session_state.Lab4_vectorDB
-        query_embedding = generate_embedding_with_retry(user_input)
-        import pdb
-        pdb.set_trace()
-        if query_embedding is None:
-            st.error("Failed to generate query embedding.")
-            return
-        try:
-            import pdb
-            pdb.set_trace()
-            results = collection.query(query_embeddings=[query_embedding], n_results=3)
-            st.write("Query results:", results)
-        except Exception as e:
-            st.error(f"Error in querying collection: {e}")
-    else:
-        st.write("Lab4 vector DB is not initialized.")
-
-# Streamlit app layout
+# Call this function in the main app logic to prevent re-indexing
 def lab4_page():
-    st.title("Lab 4 - Vector Database with ChromaDB")
+    # Initialize the ChromaDB collection automatically
+    initialize_chromadb()
 
-    # Button to initialize the vector DB
-    if st.button("Initialize Vector DB"):
-        create_lab4_vector_db()
+    # Perform indexing only if not already done
+    index_pdfs_in_chromadb()
 
-    # Chatbot Interface
-    st.subheader("Chatbot Interface")
-    user_input = st.text_input("Enter your query here:")
-    if st.button("Ask Chatbot"):
-        chatbot_interaction(user_input)
-
-# Main Streamlit navigation
-st.sidebar.title("Navigation")
-page = st.sidebar.selectbox("Go to", ["Home", "Lab 4", "Chatbot"])
-
-if page == "Lab 4":
-    lab4_page()
-else:
-    st.write("Welcome to the main page!")
+    # Display the number of documents after indexing
+    st.write(
+        f"Number of documents after indexing: {st.session_state.Lab4_vectorDB.count()}"
+    )
+    chatbot_page()
