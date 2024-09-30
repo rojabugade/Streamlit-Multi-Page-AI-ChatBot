@@ -77,7 +77,7 @@ def get_embeddings_for_chunks(chunks):
             time.sleep(
                 1
             )  # Add a 1-second delay between each request to avoid rate limiting
-        except openai.RateLimitError as e:
+        except openai.error.RateLimitError as e:
             st.error(
                 f"Rate limit hit: {str(e)}. Waiting for 10 seconds before retrying..."
             )
